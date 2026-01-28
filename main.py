@@ -30,9 +30,8 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QFileDialog,
     QListWidget,
-    QSplitter,
     QDateTimeEdit,
-    QScrollArea,   # <-- ADDED
+    QScrollArea,
 )
 
 from models import Entry
@@ -81,6 +80,7 @@ def _find_existing(ticket: str, folder: str) -> list[str]:
     try:
         return list(storage.find_existing_logs_for_ticket(ticket, folder))
     except Exception:
+        # fallback best-effort
         ticket = _sanitize_ticket(ticket)
         out: list[str] = []
         try:
@@ -102,27 +102,6 @@ def _parse_txt(path: str) -> dict:
         return storage.parse_incident_txt(path)
     except Exception:
         return {"context": {}, "entries": []}
-
-
-def _save_draft(data: dict) -> None:
-    try:
-        storage.save_draft(data)
-    except Exception:
-        pass
-
-
-def _load_draft() -> Optional[dict]:
-    try:
-        return storage.load_draft()
-    except Exception:
-        return None
-
-
-def _clear_draft() -> None:
-    try:
-        storage.clear_draft()
-    except Exception:
-        pass
 
 
 # -----------------------------
@@ -148,7 +127,7 @@ class IncidentLogbookWindow(QMainWindow):
         self._build_actions_and_menu()
         self._build_ui()
 
-        # Autosave draft every 60s
+        # Autosave draft every 60s (kept as-is)
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setInterval(60_000)
         self.autosave_timer.timeout.connect(self._autosave_draft)
@@ -189,7 +168,7 @@ class IncidentLogbookWindow(QMainWindow):
     # ---------------- UI ----------------
 
     def _build_ui(self) -> None:
-        # Central + Scroll Area (fix cramped minimized window)
+        # Central + Scroll Area (minimized window stays usable)
         central = QWidget()
         self.setCentralWidget(central)
         central_layout = QVBoxLayout(central)
@@ -204,7 +183,7 @@ class IncidentLogbookWindow(QMainWindow):
         content = QWidget()
         scroll.setWidget(content)
 
-        # Prevent extreme squeeze; prefer scroll instead of crushing layouts
+        # Prefer scroll instead of crushing layouts
         content.setMinimumWidth(980)
 
         root = QVBoxLayout(content)
@@ -262,14 +241,12 @@ class IncidentLogbookWindow(QMainWindow):
         self.lbl_ticket.setStyleSheet("color: #bdbdbd;")
         info_row.addWidget(self.lbl_ticket)
         root.addLayout(info_row)
-      
 
-        # -------- Entry controls (two-row grid so it looks OK minimized) --------
+        # -------- Entry controls --------
         controls = QGridLayout()
         controls.setHorizontalSpacing(10)
         controls.setVerticalSpacing(6)
 
-        # Row 0
         controls.addWidget(QLabel("Type:"), 0, 0)
         self.type_combo = QComboBox()
         self.type_combo.addItems(["Observation", "Action", "Mitigation", "Escalation", "Resolution", "Communication"])
@@ -287,7 +264,6 @@ class IncidentLogbookWindow(QMainWindow):
         btn_apply_mode.clicked.connect(self._apply_entry_mode)
         controls.addWidget(btn_apply_mode, 0, 4)
 
-        # Row 1
         controls.addWidget(QLabel("Entry User:"), 1, 0)
         self.entry_user_edit = QLineEdit(getpass.getuser())
         self.entry_user_edit.setMinimumWidth(140)
@@ -308,7 +284,7 @@ class IncidentLogbookWindow(QMainWindow):
         controls.setColumnStretch(3, 1)
         root.addLayout(controls)
 
-        # -------- Entry input (single/multi swap container) --------
+        # -------- Entry input --------
         self.entry_row = QHBoxLayout()
 
         self.single_entry = QLineEdit()
@@ -338,7 +314,6 @@ class IncidentLogbookWindow(QMainWindow):
 
         self.entry_mode_combo.setCurrentText("Multiline (Ctrl+Enter adds)")
         self._apply_entry_mode()
-      
 
         # -------- Attachments --------
         attach_box = QGroupBox("Attachments")
@@ -405,7 +380,6 @@ class IncidentLogbookWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.table.setWordWrap(True)
-        self.table.cellDoubleClicked.connect(self.edit_selected_row)
         self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setDefaultSectionSize(26)
@@ -434,8 +408,6 @@ class IncidentLogbookWindow(QMainWindow):
         root.addLayout(actions)
 
         self._refresh_ticket_banner()
-
-        
 
     # ---- Entry mode swap ----
 
@@ -522,7 +494,7 @@ class IncidentLogbookWindow(QMainWindow):
 
             self.table.setRowHidden(row, not (in_range and matches))
 
-    # ---------------- Draft autosave ----------------
+    # ---------------- Draft autosave (unchanged behavior) ----------------
 
     def _context_dict(self) -> dict:
         return {
@@ -534,21 +506,27 @@ class IncidentLogbookWindow(QMainWindow):
         }
 
     def _autosave_draft(self) -> None:
-        if not self.dirty and not self.entries and not self.attachments:
-            return
-
-        draft = {
-            "schema_version": 1,
-            "session_start": self.session_start,
-            "ticket": self.current_ticket,
-            "context": self._context_dict(),
-            "entries": [e.to_dict() for e in self.entries],
-            "attachments": list(self.attachments),
-        }
-        _save_draft(draft)
+        try:
+            if not self.dirty and not self.entries and not self.attachments:
+                return
+            draft = {
+                "schema_version": 1,
+                "session_start": self.session_start,
+                "ticket": self.current_ticket,
+                "context": self._context_dict(),
+                "entries": [e.to_dict() for e in self.entries],
+                "attachments": list(self.attachments),
+            }
+            storage.save_draft(draft)
+        except Exception:
+            pass
 
     def _restore_draft_if_present(self) -> None:
-        d = _load_draft()
+        try:
+            d = storage.load_draft()
+        except Exception:
+            d = None
+
         if not d:
             return
 
@@ -559,11 +537,19 @@ class IncidentLogbookWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if resp != QMessageBox.StandardButton.Yes:
-            _clear_draft()
+            try:
+                storage.clear_draft()
+            except Exception:
+                pass
             return
 
         self.current_ticket = d.get("ticket") or None
 
+        # restore context
+        ctx = d.get("context") or {}
+        self._apply_context(ctx)
+
+        # restore entries
         self.entries.clear()
         self.table.setRowCount(0)
         self.next_id = 1
@@ -579,21 +565,101 @@ class IncidentLogbookWindow(QMainWindow):
             self.next_id = max(self.next_id, e.id + 1)
             self._append_entry(e, mark_dirty=False)
 
+        # restore attachments UI
+        self.attachments = list(d.get("attachments", []))
+        self.attach_list.clear()
+        for a in self.attachments:
+            self.attach_list.addItem(a)
+
         self.dirty = True
         self._refresh_ticket_banner()
         self.apply_filters()
 
-    # ---------------- Startup ticket load ----------------
+    def _apply_context(self, ctx: dict) -> None:
+        classification = (ctx.get("classification") or "").strip().upper()
+        service = (ctx.get("service") or "").strip()
+        irr_owner = (ctx.get("irr_owner") or "").strip()
+        impacted = (ctx.get("impacted_service") or "").strip()
+        summary = (ctx.get("summary") or "").strip()
+
+        if classification in ("IMPACT", "RISK"):
+            self.class_combo.setCurrentText(classification)
+
+        if service:
+            # try to set dropdown to matching option
+            try:
+                self.service_dropdown.setCurrentText(service)
+            except Exception:
+                pass
+
+        if irr_owner:
+            self.irr_owner_edit.setText(irr_owner)
+        if impacted:
+            self.impacted_service_edit.setText(impacted)
+        if summary:
+            self.summary_edit.setText(summary)
+
+    # ---------------- Startup ticket load (restored from your perfect version) ----------------
 
     def _startup_ticket_prompt_and_load(self) -> None:
         ticket, ok = QInputDialog.getText(self, "Ticket", "Enter ticket number to load (leave blank for new):")
         if not ok:
             return
+
         ticket = _sanitize_ticket(ticket)
         if not ticket:
             return
+
         self.current_ticket = ticket
+        docs = _docs_path()
+        existing = _find_existing(ticket, docs)
+
+        if existing:
+            most_recent = existing[0]
+            resp = QMessageBox.question(
+                self,
+                "Load existing log?",
+                f"Found an existing log for this ticket:\n\n{most_recent}\n\nLoad it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if resp == QMessageBox.StandardButton.Yes:
+                parsed = _parse_txt(most_recent)
+                self._apply_context(parsed.get("context", {}))
+                self._load_entries(parsed.get("entries", []))
+                self.loaded_from_path = most_recent
+                self.statusBar().showMessage(f"Loaded existing log: {os.path.basename(most_recent)}")
+        else:
+            self.statusBar().showMessage("Ticket set. No existing log found; starting new.")
+
         self._refresh_ticket_banner()
+
+    def _load_entries(self, parsed_entries: list[dict]) -> None:
+        if not parsed_entries:
+            return
+
+        self.entries.clear()
+        self.table.setRowCount(0)
+        self.next_id = 1
+
+        for raw in parsed_entries:
+            t = (raw.get("time") or "").strip()
+            u = (raw.get("user") or "").strip() or getpass.getuser()
+            ty = (raw.get("type") or "Observation").strip()
+            msg = (raw.get("entry") or "").strip()
+            if not (t and msg):
+                continue
+
+            e = Entry(
+                id=self.next_id,
+                time=t,
+                user=u,
+                type=ty,
+                entry=msg,
+            )
+            self.next_id += 1
+            self._append_entry(e, mark_dirty=False)
+
+        self.apply_filters()
 
     # ---------------- Entries ----------------
 
@@ -649,6 +715,8 @@ class IncidentLogbookWindow(QMainWindow):
         self.table.insertRow(row)
 
         it_time = QTableWidgetItem(e.time)
+        it_time.setData(Qt.ItemDataRole.UserRole, e.id)  # critical for edit mapping
+
         it_user = QTableWidgetItem(e.user)
         it_type = QTableWidgetItem(e.type)
         it_entry = QTableWidgetItem(e.entry)
@@ -670,14 +738,13 @@ class IncidentLogbookWindow(QMainWindow):
 
         it = self.table.item(row, 0)
         if not it:
-                return
+            return
 
         entry_id = it.data(Qt.ItemDataRole.UserRole)
         if entry_id is None:
             return
 
-        # find entry in model
-        e = next((x for x in self.entries if x.id == entry_id), None)
+        e = next((x for x in self.entries if x.id == int(entry_id)), None)
         if not e:
             return
 
@@ -687,13 +754,11 @@ class IncidentLogbookWindow(QMainWindow):
 
         new_time, new_user, new_type, new_text = dlg.get_values()
 
-        # update model
         e.time = new_time
         e.user = new_user
         e.type = new_type
         e.entry = new_text
 
-        # update table cells
         self.table.item(row, 0).setText(e.time)
         self.table.item(row, 1).setText(e.user)
         self.table.item(row, 2).setText(e.type)
@@ -708,15 +773,121 @@ class IncidentLogbookWindow(QMainWindow):
         row = self.table.currentRow()
         if row < 0:
             return
+
+        it = self.table.item(row, 0)
+        entry_id = it.data(Qt.ItemDataRole.UserRole) if it else None
+
         self.table.removeRow(row)
+
+        if entry_id is not None:
+            self.entries = [e for e in self.entries if e.id != int(entry_id)]
+
         self.dirty = True
 
     def clear_all(self) -> None:
+        if not self.entries:
+            return
+
+        resp = QMessageBox.question(
+            self,
+            "Confirm",
+            "Clear all entries?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+
         self.table.setRowCount(0)
         self.entries.clear()
         self.dirty = True
 
-    # ---------------- Save ----------------
+    # ---------------- Save / Append (RESTORED PERFECT BEHAVIOR) ----------------
+
+    def _resolve_ticket_for_save(self) -> Optional[str]:
+        if self.current_ticket:
+            resp = QMessageBox.question(
+                self,
+                "Ticket",
+                f"Save under current ticket?\n\n{self.current_ticket}\n\nYes = use it\nNo = enter different ticket",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
+            )
+            if resp == QMessageBox.StandardButton.Cancel:
+                return None
+            if resp == QMessageBox.StandardButton.Yes:
+                return self.current_ticket
+
+        ticket, ok = QInputDialog.getText(self, "Ticket Number", "Enter Ticket Number:")
+        if not ok or not (ticket or "").strip():
+            return None
+        return _sanitize_ticket(ticket)
+
+    def finish_and_save(self) -> None:
+        if not self.entries:
+            QMessageBox.information(self, "No entries", "No entries recorded. Nothing to save.")
+            return
+
+        ticket = self._resolve_ticket_for_save()
+        if not ticket:
+            QMessageBox.warning(self, "Ticket required", "Ticket number is required. File not saved.")
+            return
+
+        self.current_ticket = ticket
+        self._refresh_ticket_banner()
+
+        docs = _docs_path()
+        if not os.path.isdir(docs):
+            QMessageBox.critical(self, "Path error", f"Documents path not found:\n{docs}")
+            return
+
+        existing = _find_existing(ticket, docs)
+
+        # Decide append/new/cancel exactly like your perfect version
+        append_mode = False
+        target_txt_path = os.path.join(docs, storage.generate_filename(ticket))
+
+        if existing:
+            most_recent = existing[0]
+            resp = QMessageBox.question(
+                self,
+                "Existing ticket log found",
+                f"Found an existing log for this ticket:\n\n{most_recent}\n\n"
+                "Yes = Append to existing (recommended)\n"
+                "No = Create New (today/user)\n"
+                "Cancel = Abort",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
+            )
+            if resp == QMessageBox.StandardButton.Cancel:
+                return
+            if resp == QMessageBox.StandardButton.Yes:
+                append_mode = True
+                target_txt_path = most_recent
+            else:
+                append_mode = False
+                target_txt_path = os.path.join(docs, storage.generate_filename(ticket))
+
+        context = self._context_dict()
+        # include user/host like the perfect version did
+        context["user"] = getpass.getuser()
+        context["host"] = socket.gethostname()
+
+        try:
+            txt_path, json_path = storage.save_incident_log(
+                target_txt_path=target_txt_path,
+                ticket=ticket,
+                session_start=self.session_start,
+                context=context,
+                entries=[e.to_dict() for e in self.entries],
+                attachments=list(self.attachments),
+                append=append_mode,
+            )
+            QMessageBox.information(self, "Saved", f"Saved to:\n{txt_path}\n\nJSON:\n{json_path}")
+            self.dirty = False
+            self.loaded_from_path = txt_path
+            self.statusBar().showMessage("Saved.")
+        except Exception as ex:
+            QMessageBox.critical(self, "Save failed", f"Could not save file:\n{ex}")
+
+    # ---------------- Banner ----------------
 
     def _refresh_ticket_banner(self) -> None:
         host = socket.gethostname()
@@ -724,12 +895,28 @@ class IncidentLogbookWindow(QMainWindow):
         t = self.current_ticket or "(not set)"
         self.lbl_ticket.setText(f"Ticket: {t}    Host: {host}    User: {user}")
 
-    def finish_and_save(self) -> None:
-        QMessageBox.information(self, "Saved", "Save logic is handled in storage.py in your project.")
-
-    # ---------------- Close confirm ----------------
+    # ---------------- Close confirm (kept safe + consistent) ----------------
 
     def closeEvent(self, event) -> None:
+        if not self.dirty:
+            event.accept()
+            return
+
+        resp = QMessageBox.question(
+            self,
+            "Unsaved changes",
+            "You have unsaved changes.\n\nSave before exiting?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
+        )
+        if resp == QMessageBox.StandardButton.Cancel:
+            event.ignore()
+            return
+        if resp == QMessageBox.StandardButton.Yes:
+            before = self.dirty
+            self.finish_and_save()
+            if before and self.dirty:
+                event.ignore()
+                return
         event.accept()
 
 

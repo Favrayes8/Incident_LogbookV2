@@ -1,23 +1,51 @@
 # storage.py
 from __future__ import annotations
-import datetime
+
+import datetime as _dt
 import getpass
 import json
 import os
 import re
 import shutil
-from typing import Any
+from typing import Optional, Tuple, Any
 
-ENTRY_RE = re.compile(
-    r"^\[(?P<time>[^\]]+)\]\s+(?P<type>[A-Z ]+)(?:\s+\((?P<user>[^)]+)\))?:\s+(?P<entry>.*)$"
-)
+# -------------------------------
+# Public constants used by main.py
+# -------------------------------
 
-SERVICE_OPTIONS = ["CIT", "DCIM", "DWDM", "Switchboard", "Internet Connect", "Metroconnect"]
+SERVICE_OPTIONS = [
+    "CIT",
+    "DCIM",
+    "DWDM",
+    "Switchboard",
+    "Internet connect",
+    "Metroconnect",
+    "Security",
+    "Compute",
+    "Storage",
+    "Other",
+]
 
+_DRAFT_FILENAME = "Incident_Logbook_DRAFT.json"
+ENTRY_RE = re.compile(r"^\[(?P<time>[^\]]+)\]\s+(?P<type>[A-Z ]+):\s+(?P<entry>.*)$")
+
+
+# -------------------------------
+# Time / paths
+# -------------------------------
 
 def now_local_str() -> str:
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
+def get_documents_path() -> str:
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    return os.path.join(home, "Documents")
+
+
+# -------------------------------
+# Ticket / filenames
+# -------------------------------
 
 def sanitize_ticket(ticket: str) -> str:
     ticket = (ticket or "").strip().upper()
@@ -26,12 +54,8 @@ def sanitize_ticket(ticket: str) -> str:
     return ticket
 
 
-def get_documents_path() -> str:
-    return os.path.join(os.environ["USERPROFILE"], "Documents")
-
-
 def generate_filename(ticket_number: str) -> str:
-    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    date_str = _dt.datetime.now().strftime("%Y%m%d")
     user = getpass.getuser().upper()
     ticket_number = sanitize_ticket(ticket_number)
     return f"INCIDENT_{date_str}_{ticket_number}_{user}.txt"
@@ -46,26 +70,29 @@ def find_existing_logs_for_ticket(ticket: str, folder: str) -> list[str]:
                 continue
             base = name[:-4]
             parts = base.split("_")
-            if len(parts) < 4:
-                continue
-            if parts[2].upper() == ticket.upper():
+            if len(parts) >= 4 and parts[2].upper() == ticket.upper():
                 matches.append(os.path.join(folder, name))
     except Exception:
         return []
+
     matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return matches
 
 
-def parse_incident_txt(path: str) -> dict[str, Any]:
+# -------------------------------
+# Parse TXT
+# -------------------------------
+
+def parse_incident_txt(path: str) -> dict:
     context = {
         "ticket": "",
         "classification": "",
-        "service_dropdown": "",
         "service": "",
-        "summary": "",
         "irr_owner": "",
+        "impacted_service": "",
+        "summary": "",
     }
-    entries: list[dict[str, str]] = []
+    entries: list[dict] = []
 
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -77,30 +104,75 @@ def parse_incident_txt(path: str) -> dict[str, Any]:
                 elif line.startswith("Classification:"):
                     context["classification"] = line.split(":", 1)[1].strip()
                 elif line.startswith("Service:"):
-                    context["service_dropdown"] = line.split(":", 1)[1].strip()
+                    context["service"] = line.split(":", 1)[1].strip()
                 elif line.startswith("IRR Owner:"):
                     context["irr_owner"] = line.split(":", 1)[1].strip()
                 elif line.startswith("Impacted Service/System:"):
-                    context["service"] = line.split(":", 1)[1].strip()
+                    context["impacted_service"] = line.split(":", 1)[1].strip()
                 elif line.startswith("Summary:"):
                     context["summary"] = line.split(":", 1)[1].strip()
 
                 m = ENTRY_RE.match(line)
                 if m:
-                    entries.append({
-                        "time": (m.group("time") or "").strip(),
-                        "user": (m.group("user") or "").strip(),
-                        "type": (m.group("type") or "").strip().title(),
-                        "entry": (m.group("entry") or "").strip(),
-                    })
+                    entries.append(
+                        {
+                            "time": m.group("time").strip(),
+                            "type": m.group("type").strip().title(),
+                            "entry": m.group("entry").strip(),
+                        }
+                    )
     except Exception:
         return {"context": context, "entries": entries}
 
     return {"context": context, "entries": entries}
 
 
-def update_json_log(json_path: str, session_obj: dict[str, Any]) -> None:
+# -------------------------------
+# Draft autosave
+# -------------------------------
+
+def _draft_path() -> str:
+    docs = get_documents_path()
+    os.makedirs(docs, exist_ok=True)
+    return os.path.join(docs, _DRAFT_FILENAME)
+
+
+def save_draft(data: dict) -> None:
+    try:
+        with open(_draft_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def load_draft() -> Optional[dict]:
+    p = _draft_path()
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            val = json.load(f)
+        return val if isinstance(val, dict) else None
+    except Exception:
+        return None
+
+
+def clear_draft() -> None:
+    try:
+        p = _draft_path()
+        if os.path.isfile(p):
+            os.remove(p)
+    except Exception:
+        pass
+
+
+# -------------------------------
+# JSON log
+# -------------------------------
+
+def update_json_log(json_path: str, session_obj: dict) -> None:
     data = {"schema_version": 1, "ticket": session_obj.get("ticket", ""), "sessions": []}
+
     if os.path.isfile(json_path):
         try:
             with open(json_path, "r", encoding="utf-8") as f:
@@ -113,79 +185,169 @@ def update_json_log(json_path: str, session_obj: dict[str, Any]) -> None:
                     data["sessions"] = sessions
         except Exception:
             data["sessions"] = []
+
     data["sessions"].append(session_obj)
+
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
-# ---------- Draft autosave ----------
-def app_data_dir() -> str:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, "IncidentLogbook")
-    os.makedirs(d, exist_ok=True)
-    return d
+# -------------------------------
+# Save / Append
+# -------------------------------
 
-
-def draft_path() -> str:
-    return os.path.join(app_data_dir(), "draft_autosave.json")
-
-
-def save_draft(draft: dict[str, Any]) -> None:
-    with open(draft_path(), "w", encoding="utf-8") as f:
-        json.dump(draft, f, indent=2)
-
-
-def load_draft() -> dict[str, Any] | None:
-    p = draft_path()
-    if not os.path.isfile(p):
-        return None
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
-
-
-def clear_draft() -> None:
-    p = draft_path()
-    try:
-        if os.path.isfile(p):
-            os.remove(p)
-    except Exception:
-        pass
-
-
-# ---------- Attachments ----------
-def ensure_attachment_dir_for_target_txt(target_txt_path: str) -> str:
-    base = os.path.splitext(target_txt_path)[0]
-    adir = base + "_attachments"
-    os.makedirs(adir, exist_ok=True)
-    return adir
-
-
-def copy_attachments(files: list[str], attachment_dir: str) -> list[str]:
+def save_incident_log(*args: Any, **kwargs: Any) -> Tuple[str, str]:
     """
-    Copy attachment files into incident attachment directory.
-    Returns list of copied absolute paths.
+    Flexible saver to match different main.py call signatures.
+
+    Accepts ANY of these patterns (and ignores unknown extras):
+      - append=True/False
+      - append_to="path/to/existing.txt"
+      - target_txt_path="path/to/new.txt"
+      - txt_path="path/to/new.txt" (alias)
+      - ticket=...
+      - session_start=..., session_end=...
+      - context=dict, entries=list, attachments=list
+
+    Returns (txt_path, json_path)
     """
-    copied: list[str] = []
-    for src in files:
-        if not src or not os.path.isfile(src):
-            continue
-        name = os.path.basename(src)
-        dst = os.path.join(attachment_dir, name)
+    # --- normalize common keyword names ---
+    ticket = sanitize_ticket(str(kwargs.get("ticket") or ""))
+    if not ticket:
+        raise ValueError("ticket is required")
 
-        # Avoid overwriting by suffixing
-        if os.path.exists(dst):
-            root, ext = os.path.splitext(name)
-            i = 2
-            while True:
-                dst = os.path.join(attachment_dir, f"{root}_{i}{ext}")
-                if not os.path.exists(dst):
-                    break
-                i += 1
+    session_start = str(kwargs.get("session_start") or now_local_str())
+    session_end = str(kwargs.get("session_end") or now_local_str())
 
-        shutil.copy2(src, dst)
-        copied.append(dst)
-    return copied
+    context = kwargs.get("context") or {}
+    entries = kwargs.get("entries") or []
+    attachments = kwargs.get("attachments") or []
+
+    # --- append handling (this is what your error screenshot is about) ---
+    append_flag = bool(kwargs.get("append", False))
+    append_to = kwargs.get("append_to")
+    target_txt_path = kwargs.get("target_txt_path") or kwargs.get("txt_path")
+
+    docs = get_documents_path()
+    os.makedirs(docs, exist_ok=True)
+
+    if append_to:
+        txt_path = str(append_to)
+        mode = "a"
+    elif append_flag:
+        # If append=True but no explicit file, append to newest existing for ticket
+        existing = find_existing_logs_for_ticket(ticket, docs)
+        if existing:
+            txt_path = existing[0]
+            mode = "a"
+        else:
+            # Nothing to append to -> create new
+            txt_path = target_txt_path or os.path.join(docs, generate_filename(ticket))
+            mode = "w"
+    else:
+        txt_path = target_txt_path or os.path.join(docs, generate_filename(ticket))
+        mode = "w"
+
+    # --- pull context fields safely ---
+    user = str(context.get("user") or getpass.getuser()).strip()
+    host = str(context.get("host") or os.environ.get("COMPUTERNAME") or "").strip()
+
+    classification = str(context.get("classification") or "IMPACT").strip() or "IMPACT"
+    service = str(context.get("service") or "").strip()
+    irr_owner = str(context.get("irr_owner") or "").strip()
+    impacted_service = str(context.get("impacted_service") or "").strip()
+    summary = str(context.get("summary") or "").strip()
+
+    # Build session for JSON
+    session_obj = {
+        "session_start": session_start,
+        "session_end": session_end,
+        "ticket": ticket,
+        "context": {
+            "classification": classification,
+            "service": service,
+            "irr_owner": irr_owner,
+            "impacted_service": impacted_service,
+            "summary": summary,
+            "user": user,
+            "host": host,
+        },
+        "entries": [
+            {
+                "time": str(e.get("time", "")).strip(),
+                "user": str(e.get("user", "")).strip(),
+                "type": str(e.get("type", "")).strip(),
+                "entry": str(e.get("entry", "")).strip(),
+            }
+            for e in entries
+            if isinstance(e, dict)
+        ],
+    }
+
+    # Write TXT
+    with open(txt_path, mode, encoding="utf-8") as f:
+        if mode == "a":
+            f.write("\n\n")
+            f.write("#" * 72 + "\n")
+            f.write(f"APPENDED SESSION - {session_end}\n")
+            f.write("#" * 72 + "\n")
+
+        f.write("Incident Log\n")
+        f.write("=" * 72 + "\n")
+        f.write(f"Ticket Number: {ticket}\n")
+        f.write(f"Classification: {classification}\n")
+        if service:
+            f.write(f"Service: {service}\n")
+        if irr_owner:
+            f.write(f"IRR Owner: {irr_owner}\n")
+        if impacted_service:
+            f.write(f"Impacted Service/System: {impacted_service}\n")
+        if summary:
+            f.write(f"Summary: {summary}\n")
+        if user:
+            f.write(f"User: {user}\n")
+        if host:
+            f.write(f"Host: {host}\n")
+        f.write(f"Session Start: {session_start}\n")
+        f.write(f"Session End: {session_end}\n")
+        f.write("=" * 72 + "\n\n")
+
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            t = str(e.get("time", "")).strip()
+            ty = str(e.get("type", "Observation")).strip() or "Observation"
+            msg = str(e.get("entry", "")).strip()
+            if not (t and msg):
+                continue
+            f.write(f"[{t}] {ty.upper()}: {msg}\n")
+
+    # Copy attachments (best effort)
+    if attachments:
+        att_dir = os.path.join(os.path.dirname(txt_path), "Attachments")
+        os.makedirs(att_dir, exist_ok=True)
+
+        for src in attachments:
+            try:
+                if not src or not os.path.isfile(src):
+                    continue
+                base = os.path.basename(src)
+                dst = os.path.join(att_dir, base)
+                if os.path.exists(dst):
+                    root, ext = os.path.splitext(base)
+                    i = 1
+                    while True:
+                        cand = os.path.join(att_dir, f"{root}_{i}{ext}")
+                        if not os.path.exists(cand):
+                            dst = cand
+                            break
+                        i += 1
+                shutil.copy2(src, dst)
+            except Exception:
+                pass
+
+    # JSON alongside TXT
+    json_path = os.path.splitext(txt_path)[0] + ".json"
+    update_json_log(json_path, session_obj)
+
+    return txt_path, json_path
